@@ -8,7 +8,11 @@
  * @param {string} keypath  "first.second.third"
  */
 export function getValue(obj, keypath) {
-  return keypath.split('.').reduce((previous, current) => previous[current], obj);
+  return keypath.split('.').reduce((previous, current) => {
+    if (previous == null || previous == undefined)
+      return null;
+    return previous[current];
+  }, obj);
 }
 
 /**
@@ -21,14 +25,12 @@ export function getValue(obj, keypath) {
 export function testValue(obj, keypath) {
   let isValid = obj != null && obj != undefined;
   return Boolean(keypath.split('.').reduce((previous, current) =>{
+    isValid = isValid && previous != null && previous != undefined;
     if (!isValid) {
       return false;
     }
-    isValid = previous != null && previous != undefined;
-    if (typeof previous === "number")
-      return previous != 0;
     else if (typeof previous === "string")
-      return previous.length != 0;
+      return previous.length != 0; 
     return previous[current]
   } , obj));
 }

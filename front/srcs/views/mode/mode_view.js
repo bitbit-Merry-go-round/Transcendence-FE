@@ -19,4 +19,5 @@ export default class ModeView extends View {
       }, 5000);
     })
   }
+
 }

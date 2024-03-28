@@ -1,0 +1,75 @@
+<tournament-panel>
+  <style>
+    #tournament-panel-container,
+    ul {
+      display: flex;
+      padding: 0;
+    }
+
+    ul {
+      flex-direction: column;
+      width: 200px;
+      list-style: none;
+      padding: 0;
+    }
+
+    li {
+    }
+
+    .game + li {
+      flex-grow: 1.2;
+    }
+
+    li:first-child,
+    li:last-child {
+      flex-grow: 0.5;
+    }
+
+    .game {
+      padding-left: 20px;
+    }
+
+    .winner {
+      font-weight: bold;
+    }
+
+    .looser {
+      color: grey;
+      font-size: 10px;
+    }
+
+    .game span {
+      float: right;
+      margin-right: 5px;
+    }
+
+    .game-top {
+      border-bottom: 2px solid black;
+    }
+
+    .game-top.winner {
+      border-bottom: 6px solid black;
+    }
+
+    .game-top + li {
+      border-right: 2px solid black;
+      min-height: 5em;
+    }
+
+    .game-bottom {
+      border-top: 2px solid black;
+    }
+
+    .game-bottom.winner {
+      border-top: 6px solid black;
+    }
+
+  </style>
+  <div id="tournament-panel-container" data-for="round in rounds">
+    <ul data-for="match in matches">
+        <li>&nbsp;</li>
+        <li class="game game-top {{match.playerA.class}}"> {{match.playerA.name}}<span>{{match.playerA.score}}</span></li>
+        <li>&nbsp;</li>
+        <li class="game game-bottom {{match.playerB.class}}">{{match.playerB.name}}<span>{{match.playerB.score}}</span></li>
+    </ul>
+</tournament-panel>

@@ -181,6 +181,11 @@ export default class ParticleGenerator {
     return this.#particleContainer;
   }
 
+  remove() {
+    this.#particles.removeFromParent();
+    this.#particleContainer.remove();
+  }
+
   /**
    * animate.
    */

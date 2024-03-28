@@ -84,7 +84,10 @@ class _ObservableObject {
     if (this.#object.hasOwnProperty(key)) {
       return this.#object[key]; 
     }
-    return undefined;
+    if( Object.getPrototypeOf(this.#object).hasOwnProperty(key)) {
+      return this.#object[key];
+    }
+    return null;
   }
 
   /**
@@ -95,7 +98,7 @@ class _ObservableObject {
     if (this.#object.hasOwnProperty(key) && 
     this.#object[key] != value) {
       this.#object[key] = value;
-      this.#valueChanged(key);
+      this.valueChanged(key);
     }
     else {
       this.#object[key] = value;
@@ -103,7 +106,7 @@ class _ObservableObject {
   }
   
   /** @param {string} key */
-  #valueChanged(key) {
+  valueChanged(key) {
     if(this.#listeners.hasOwnProperty(key)) {
       this.#listeners[key].forEach(e => 
         e.callback(this.#object[key])
@@ -111,7 +114,7 @@ class _ObservableObject {
     }
   }
 
-  #sumNumberOfListners() {
+  #sumNumberOfLisetners() {
     let sum = 0;
     for (const key in this.#listeners) {
       sum += this.#listeners[key].length;
@@ -124,7 +127,7 @@ class _ObservableObject {
    * @param {(value: any) => void} listener
    */
   subscribe(key, listener) {
-    if (this.#sumNumberOfListners() >= _ObservableObject.MAX_LISTENER) {
+    if (this.#sumNumberOfLisetners() >= _ObservableObject.MAX_LISTENER) {
       console.error("max listener is exceeded");
       return -1;
     }

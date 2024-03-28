@@ -1,6 +1,7 @@
 import ObservableObject from "@/lib/observable_object";
 import User, { createProfile } from "@/data/user";
-import { GameData, Player } from "./game_data";
+import { GameData, Player } from "@/data/game_data";
+import { generateRandomName } from "@/utils/random_name.js";
 
 const globalData = (() =>{
   const user = new ObservableObject(new User({
@@ -21,15 +22,17 @@ const globalData = (() =>{
     ],
   }))
 
-  const bart = new Player({
-    nickname: "bart"
-  });
-  const heshin = new Player({
-    nickname: "heshin"
-  });
-  const gameData = new ObservableObject(new GameData({
-    players: [bart, heshin],
-  }));
+    const game = GameData.createTournamentGame(
+      [
+        generateRandomName(),  
+        generateRandomName(),  
+        generateRandomName(),  
+        generateRandomName(),  
+      ]
+    )
+  //const game = GameData.createLocalGame();
+
+  const gameData = new ObservableObject(game);
 
   return ({ user, gameData });
 })();

@@ -6,6 +6,7 @@ export default class ImageGenerator {
   #ctx;
   #size;
   #xmlSerializer = new XMLSerializer();
+  #needClean = false;
 
   constructor({size}) {
     this.#canvas = document.createElement("canvas");
@@ -29,7 +30,12 @@ export default class ImageGenerator {
   }
 
   draw(image) {
+    if (this.#needClean) {
+      this.#ctx.clearRect(0, 0, this.#size.width, this.#size.height);
+      this.#needClean = false;
+    }
     this.#ctx.drawImage(image, 0, 0, this.#size.width, this.#size.height);
+    this.#needClean = true;
     return this.#canvas;
   }
 

@@ -1,10 +1,10 @@
 import * as THREE from "three";
 import Physics from "@/game/physics";
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
-import PhysicsEntity from "@/game/physicsEntity";
 import { EPSILON } from "@/game/physicsUtils";
+import PhysicsEntity from "@/game/physicsEntity";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
-import { GameData, Player } from "@/data/game_data";
+import { GameData, Player, GAME_TYPE } from "@/data/game_data";
 import ParticleGenerator from "@/game/particleGenerator";
 import ObservableObject from "@/lib/observable_object";
 import GUI from "node_modules/lil-gui/dist/lil-gui.esm.min.js";
@@ -13,10 +13,13 @@ import { WALL_TYPES, DIRECTION, GameMap } from "@/data/game_map";
 import LeafGenerator from "@/game/leafGenerator";
 import ImageGenerator from "@/utils/image_generator";
 import UserLabel from "@/views/components/user_label";
+import View from "@/lib/view";
 
 export const ASSETS = Object.freeze({
   scene: "assets/models/scene/game_scene.glb",
   leaf: "assets/models/leaf/leaf.gltf",
+  board: "assets/models/board/board.glb",
+  laurel_wreath: "assets/models/laurel_wreath/scene.gltf",
   bgm: "assets/sound/bgm1.mp3",
   hitSound: "assets/sound/hit.mp3",
   winSound: "assets/sound/win.mp3",
@@ -28,6 +31,7 @@ const MAX_PEDDLE_SPEED = 50;
 const PEDDLE_ACCEL = 10;
 const PEDDLE_DECEL_RATIO = 0.5;
 const SOUND_EFFECT_THRESHOLD = 0.3;
+const SAFE_WALL_STUCK_THRESHOLD = 4;
 
 const PLAYER_POSITION = Object.freeze({
   [DIRECTION.top]: 0,
@@ -70,9 +74,13 @@ const controlMap = {
  */
 export default class Scene {
 
+  // debug
+  #isDebug = false;
+
   #physics;
   #scene;
   #scene_objs = {};
+  /** @type {GameData} */
   #gameData;
   #gameMap;
 
@@ -86,15 +94,25 @@ export default class Scene {
    *  width: number
    *  height: number
    * }} */
+
+  /** @type {{
+   *  container: THREE.Group,
+   *  board: THREE.Object3D,
+   *  generator: ImageGenerator
+   * }}
+   */
+  #tournamentBoard = null;
   #windowSize;
 
   /** @type {THREE.PerspectiveCamera} */
   #camera;
+  /** @type {OrbitControls} */
+  #controls;
 
   cameraPositions = { 
-    start: { x: 0, y: 80, z: 30 },
+    start: { x: 0, y: 70, z: 30 },
     startRotate: { x: 0, y: 20, z: 10 },
-    play: { x: 0.2, y: 1.8, z: 0.60 },
+    play: { x: 0.2, y: 1.8, z: 0.75 },
   };
 
   cameraRotations = {
@@ -163,6 +181,8 @@ export default class Scene {
   
   /** @type {number} */
   wallColor = 0x00ff00;
+
+  #safeWallHitCount = 0;
 
   /** @type {{
    *    mesh: THREE.Mesh,
@@ -239,7 +259,9 @@ export default class Scene {
    *    key: string,
    *    animation: Animation,
    *    speed: number,
-   *    onProgress: (current: { x: number, y: number, z: number }) => void,
+   *    onProgress: (
+   *    current: ({ x: number, y: number, z: number }|
+   *    { x: number, y: number } | number)) => void,
    *    onEnded: (last: { x: number, y: number, z: number }) => void
    *  }[]} 
    */
@@ -256,6 +278,9 @@ export default class Scene {
    * }} */
   #loadedTextures = { };
 
+  /** @type {THREE.Object3D} */
+  #trophy;
+
   #gameSize = {
     width: 100,
     height: 100,
@@ -267,20 +292,54 @@ export default class Scene {
     peddle: 3
   };
 
+  /** @type {{
+   *  topLeft:{
+   *    generator: ImageGenerator,
+   *    mesh: Promise<THREE.Mesh>,
+   *    view: UserLabel
+   *  },
+   *  bottomRight: {
+   *    generator: ImageGenerator,
+   *    mesh: Promise<THREE.Mesh>,
+   *    view: UserLabel
+   *  },
+   *  label: UserLabel,
+   *  size: {
+   *    width: number,
+   *    height: number
+   *  },
+   *  texts: {
+   *    player1: string[],
+   *    player2: string[]
+   *  }
+   * }}
+   */
+  #playerLabels;
+
   #renderId = 0;
+  #stuckHandler;
 
   /**
    * @params {Object} params
    * @param {{
    *  canvas: HTMLCanvasElement,
    *  gameData: ObservableObject,
-   *  gameMap: GameMap
+   *  gameMap: GameMap,
+   *  stuckHandler: ((isStuck:boolean) => void) | null
    * }} params
    */
-  constructor({canvas, gameData, gameMap}) {
+  constructor({canvas, gameData, gameMap, stuckHandler = null}) {
     this.#canvas = canvas;
+    //@ts-ignore
     this.#gameData = gameData;
     this.#gameMap = gameMap;
+    if (stuckHandler) {
+      this.#stuckHandler = /**@param {boolean} isStuck */ (isStuck) => {
+        stuckHandler(isStuck);
+      }
+    }
+    else 
+      this.#stuckHandler = null;
     this.#scene = new THREE.Scene();
     this.#gameScene = new THREE.Group();
     this.#windowSize = {
@@ -290,6 +349,7 @@ export default class Scene {
     this.#physics = new Physics();
     this
       .#setSceneBackground()
+      .#setPlayerLabels()
       .#load()
       .#init()
       .#setGameBackground()
@@ -301,7 +361,29 @@ export default class Scene {
       .#startRender();
   }
 
+  changePlayer(players) {
+    if (this.#gameData.gameType == GAME_TYPE.local1on1) {
+      throw "Invalid call change player";
+    }
+    this.#updateLabel({
+      player: players[0],
+      position: "TopLeft"}
+    );
+    this.#updateLabel({
+      player: players[1],
+      position: "BottomRight"}
+    );
+  }
+
   startGame() {
+    this.#addBall();
+    this.isBallMoving = true;
+  }
+
+  resetBall() {
+    if (this.#ball.mesh) {
+      this.#removeBall();
+    }
     this.#addBall();
     this.isBallMoving = true;
   }
@@ -310,23 +392,40 @@ export default class Scene {
     if (this.#ball.mesh)  {
       this.#removeBall();
     }
-    const cameraDest = {
-      x: this.#camera.position.x,
-      y: this.#camera.position.y,
-      z: this.#camera.position.z + 1.5,
-    }
     const sound = new Audio(
       ASSETS.winSound
     );
     sound.volume = 0.8;
     sound.play();
-    this.#moveCamera({
-      dest: cameraDest,
-      speed: 0.01,
-      curve: AnimationCurves.easein
+    this.isBallMoving = false;
+    const cameraDest = { ...this.cameraPositions.play };
+    cameraDest.z += 0.5;
+    this.#showLeaves();
+    if (this.#gameData.gameType == GAME_TYPE.localTournament &&
+    this.#gameData.tournament.isLastRound) {
+      cameraDest.z += 3;
+      this.#moveObject({
+        target: this.#camera,
+        dest: cameraDest,
+        speed: 0.005,
+        curve: AnimationCurves.easein,
+        onEnded: () => {
+          this.#gameParticle.remove();
+          this.#showTrophy();
+        }
+      });
+    }
+    else {
+      this.#moveObject({
+        target: this.#camera,
+        dest: cameraDest,
+        speed: 0.01,
+        curve: AnimationCurves.easein
     });
-    
-    // leaf
+    }
+  }
+
+  #showLeaves() {
     const container = new THREE.Mesh(
       new THREE.BoxGeometry(),
       new THREE.MeshBasicMaterial({
@@ -343,23 +442,262 @@ export default class Scene {
       endY: -1,
       container
     });
-    this.isBallMoving = false;
+    return this;
   }
 
-  async createLabel() {
-    const label = new UserLabel({data: {}});
-    await label.render();
-    const labelSize = {
-      width: Number(label.children[0].style.width.replace("px", "")),
-      height: Number(label.children[0].style.height.replace("px", ""))
-    };
-    const imageGenerator = new ImageGenerator({
-      size: labelSize
+  showTournamentBoard(onEnded) {
+    const cameraDest = { ...this.cameraPositions.play };
+    cameraDest.x -= 1.0;
+    cameraDest.z += 1.5;
+    this.#moveObject({
+      target: this.#camera,
+      dest: cameraDest,
+      speed: 0.01,
+      curve: AnimationCurves.easein,
+      onEnded: () => {
+        /** @type {THREE.Object3D} */
+        const target = this.#tournamentBoard.board;
+        const targetPos = new THREE.Vector3();
+        target.getWorldPosition(targetPos);
+        targetPos.z += 0.5;
+        this.#rotateCameraTo({
+          targetPos,
+          speed: 0.01,
+          curve: AnimationCurves.easein,
+          onEnded: onEnded
+        })
+      }
     });
-    imageGenerator.generate(label)
-      .then(canvas => {
-        document.body.appendChild(canvas);
+  }
+
+  goToGamePosition(onEnded) {
+    this.#moveObject({
+      target: this.#camera,
+      dest: {...this.cameraPositions.play},
+      curve: AnimationCurves.easeout,
+      speed: 0.015,
+    });
+    this.#animateRotation({
+      target: this.#camera,
+      dest: {...this.cameraRotations.play},
+      speed: 0.015,
+      onEnded: onEnded
+    })
+  }
+
+  #showTrophy(onEnded) {
+    if (!this.#trophy) {
+      console.error("trophy is not loaded");
+      return ;
+    }
+    this.#trophy.position.set(
+      this.#camera.position.x,
+      this.#camera.position.y + 0.5, 
+      this.#camera.position.z - 1.5
+    )
+    const spotLight = new THREE.SpotLight(new THREE.Color("white"));
+    spotLight.intensity = 100;
+    spotLight.distance = 5;
+    spotLight.angle = Math.PI * 0.1;
+    spotLight.position.set(
+      this.#trophy.position.x,
+      this.#trophy.position.y + 1,
+      this.#trophy.position.z
+    );
+    spotLight.target = this.#trophy;
+    this.#trophy.visible = true;
+    this.#scene.add(spotLight);
+    const dest = new THREE.Vector3().copy(this.#trophy.position);
+    dest.y -= 0.5;
+    this.#moveObject({
+      target: this.#trophy,
+      dest,
+      speed: 0.01,
+      onEnded: () => {
+        this.#animateRotation({
+          target:this.#trophy,
+          speed: 0.001,
+          dest: {
+            x: this.#trophy.rotation.x,
+            y: this.#trophy.rotation.y + Math.PI * 2.0,
+            z: this.#trophy.rotation.z
+          },
+          repeat: true
+        });
+
+      }
+    });
+  }
+
+  updateBoard(content) {
+    this.#tournamentBoard.generator.generate(content)
+      .then(canvas =>  {
         const texture = new THREE.Texture(canvas);
+        texture.needsUpdate = true;
+        /** @type {THREE.Mesh} */ //@ts-ignore
+        const board = this.#tournamentBoard.board;
+        /** @type {THREE.MeshBasicMaterial} */ //@ts-ignore
+        const material = board.material;
+        material.map = texture
+        material.needsUpdate = true;
+        return ;
+      });
+  }
+
+  /** @param {HTMLElement} content */
+  createBoard(content) {
+    this.#gltfLoader.load(
+      ASSETS.board,
+      (gltf) => {
+        /** @type {THREE.Object3D} */
+        let root = gltf.scene;
+        while (root.children.length == 1) {
+          root = root.children[0];
+        }
+        const board = root.children.find(
+          o => o.name == "Board"
+        ); 
+        const scene = gltf.scene;
+        const width = content.style.width;
+        const height = content.style.height;
+        const size = {
+          width: Number(width.replace("px", "")),
+          height: Number(height.replace("px", "")),
+        };
+        this.#tournamentBoard = {
+          container: scene,
+          board,
+          generator: new ImageGenerator({ size })
+        };
+        scene.rotation.y = Math.PI * 0.4;
+        board.scale.x = -0.8;
+        scene.position.set(-2.5, 0, 1);
+        board.position.z -= 0.1;
+        board.rotation.y = Math.PI;
+        this.#scene.add(scene);
+        this.#tournamentBoard.generator.generate(content)
+          .then(canvas => {
+            const texture = new THREE.Texture(canvas);
+            texture.needsUpdate = true;
+            /** @type {THREE.Mesh} */ //@ts-ignore
+            const mesh = board;
+            mesh.material = new THREE.MeshBasicMaterial({
+              map: texture,
+              transparent: true
+            });
+          })
+      },
+    )
+  }
+
+  #setPlayerLabels() {
+
+    //@ts-ignore
+    this.#playerLabels = {};
+    const player1Controls = {
+      left: Object.keys(controlMap).find(key => 
+        controlMap[key].player == 0 && controlMap[key].x == -1
+      ),
+      right: Object.keys(controlMap).filter(key => 
+        controlMap[key].player == 0 && controlMap[key].x == 1
+      )
+    }
+    const player2Controls = {
+      left: Object.keys(controlMap).find(key => 
+        controlMap[key].player == 1 && controlMap[key].x == -1
+      ),
+      right: Object.keys(controlMap).filter(key => 
+        controlMap[key].player == 1 && controlMap[key].x == 1
+      )
+    }
+    this.#playerLabels.texts = {
+      player1: [
+        "L: " + player1Controls.left,
+        "R: " + player1Controls.right
+      ],
+      player2: [
+        "L: " + player2Controls.left,
+        "R: " + player2Controls.right
+      ]
+    }
+    const players = this.#gameData.currentPlayers;
+    this.#playerLabels.size = { width: 200, height: 250 };
+    //@ts-ignore 
+    this.#playerLabels.topLeft = {
+      generator :
+      new ImageGenerator({
+        size: this.#playerLabels.size
+      })
+    };
+    //@ts-ignore 
+    this.#playerLabels.bottomRight = {
+      generator :
+      new ImageGenerator({
+        size: this.#playerLabels.size
+      })
+    };
+    this.#playerLabels.topLeft.mesh = this.#createLabel({
+      player: players[0],
+      position: "TopLeft",
+    });
+    this.#playerLabels.bottomRight.mesh = this.#createLabel({
+      player: players[1],
+      position: "BottomRight",
+    });
+    return this;
+  }
+
+  /** @param {{
+   *  player: Player,
+   *  position: "TopLeft" | "BottomRight"
+   * }} params */
+  async #updateLabel({ player, position }) {
+    const {view, generator, mesh} = position == "TopLeft" ?
+      this.#playerLabels.topLeft: 
+      this.#playerLabels.bottomRight;
+    /** @type {HTMLElement} */
+    const name = view.querySelector("#label-user-name");
+    name.innerText = player.nickname;
+    const canvas = await generator.generate(view);
+    mesh.then(mesh => {
+      const texture = new THREE.Texture(canvas);
+      texture.minFilter = THREE.NearestFilter;
+      texture.magFilter = THREE.NearestFilter;
+      texture.needsUpdate = true;
+        /** @type {THREE.MeshBasicMaterial} */ //@ts-ignore
+      const material = mesh.material;
+      material.map = texture
+      material.needsUpdate = true;
+    })
+  }
+
+  /** @param {{
+   *  player: Player,
+   *  position: "TopLeft" | "BottomRight"
+   * }} params */
+  async #createLabel({player, position}) {
+     
+    const view = new UserLabel({data: {
+      name: player.nickname,
+      texts: position == "TopLeft" ? this.#playerLabels.texts.player1: this.#playerLabels.texts.player2
+    }});
+    await view.render();
+    if (position == "TopLeft") {
+      this.#playerLabels.topLeft.view = view;
+    }
+    else {
+      this.#playerLabels.bottomRight.view = view;
+    }
+    //@ts-ignore 
+    view.children[0].style.width = this.#playerLabels.size.width + "px";
+    //@ts-ignore 
+    view.children[0].style.height = this.#playerLabels.size.height+ "px";
+    const generator = position == "TopLeft" ? this.#playerLabels.topLeft.generator : this.#playerLabels.bottomRight.generator;
+    return generator.generate(view)
+      .then(canvas => {
+        const texture = new THREE.Texture(canvas);
+        texture.minFilter = THREE.NearestFilter;
+        texture.magFilter = THREE.NearestFilter;
         texture.needsUpdate = true;
         const plane = new THREE.PlaneGeometry(
           0.3, 
@@ -367,18 +705,16 @@ export default class Scene {
         );
         const mesh = new THREE.Mesh(plane, new THREE.MeshBasicMaterial({
           map: texture,
-          transparent: true,
-          
+          transparent: true
         }));
-        mesh.position.y = 2;
-        mesh.position.z = 1;
-        this.#scene.add(mesh);
-      })
-  
+        mesh.scale.set(1.5, 1, 1);
+        return mesh;
+      });
   }
 
   prepareDisappear() {
     this.#bgm.pause();
+    this.#bgm.currentTime = 0;
   }
 
   #load() {
@@ -402,6 +738,7 @@ export default class Scene {
 
         /** @type {THREE.Mesh} */
         const mac = this.#scene_objs["macintosh"];
+
 
         /** @type {THREE.Mesh} */
         let screen;
@@ -431,37 +768,41 @@ export default class Scene {
           (screenSize.y / sceneSize.y) * 0.65,
           (screenSize.x / sceneSize.x) * 0.8
         );
+        const labelContainer = screen.parent;
+        this.#playerLabels.topLeft.mesh
+          .then(label => {
+            label.position.set(-0.6, 1.2, 1.5);
+            labelContainer.add(label)}
+          );
+        this.#playerLabels.bottomRight.mesh
+          .then(label => {
+            label.position.set(0.5, -0.4, 1.5);
+            labelContainer.add(label);
+          });
          
         screen.parent.add(this.#gameScene);
         screen.removeFromParent();
 
-        const target = new THREE.Vector3();
-        mac.getWorldPosition(target);
-        this.controls.target.set(target.x, target.y, target.z);
         this.#scene.add(scene);
         this.#camera.position.set(
           this.cameraPositions.start.x,
           this.cameraPositions.start.y,
           this.cameraPositions.start.z,
         );
+        const screenPos = new THREE.Vector3();
+        this.#gameScene.getWorldPosition(screenPos);
+        if (this.#isDebug)
+          this.#controls.target = screenPos;
         this.#camera.lookAt(0, 0, 0);
-        this.#moveCamera({
+        this.#moveObject({
+          target: this.#camera,
           dest: {...this.cameraPositions.startRotate},
           speed: 0.008,
           curve: AnimationCurves.easein,
           onEnded: () => {
             this.#sceneParticle.isPlaying = false;
             this.#gameParticle.isPlaying = true;
-          
-            this.#moveCamera({
-              dest: {...this.cameraPositions.play},
-              curve: AnimationCurves.easeout,
-              speed: 0.015,
-            });
-            this.#rotateCamera({
-              dest: {...this.cameraRotations.play},
-              speed: 0.015
-            })
+            this.goToGamePosition(); 
           }
         });
       },
@@ -474,13 +815,26 @@ export default class Scene {
 
     // bgm
     this.#bgm = new Audio(ASSETS.bgm);
+    this.#bgm.loop = true;
     this.#bgm.volume = 0.05;
     this.#bgm.play()
+
+    if (this.#gameData.gameType == GAME_TYPE.localTournament) {
+      this.#gltfLoader.load(ASSETS.laurel_wreath,
+        (gltf) => {
+          gltf.scene.scale.set(0.1, 0.1, 0.1);
+          gltf.scene.position.set(1, 2, 2);
+          this.#trophy = gltf.scene;
+          this.#trophy.visible = false;
+          this.#scene.add(this.#trophy);
+        })
+    }
 
     return this;
   }
 
   /** @param {{
+   *    target: THREE.Object3D,
    *    dest: {
    *      x: number, y: number, z: number
    *    },
@@ -491,9 +845,9 @@ export default class Scene {
    *    }) => void
    * }} params
    */
-  #moveCamera({dest, speed, curve = AnimationCurves.smoothstep, onEnded = () => {}}) {
+  #moveObject({target, dest, speed, curve = AnimationCurves.smoothstep, onEnded = () => {}}) {
     const animation = new Animation({
-      start: this.#camera.position.clone(),
+      start: target.position.clone(),
       end: new THREE.Vector3(
         dest.x, 
         dest.y,
@@ -501,13 +855,13 @@ export default class Scene {
       ),
       curve,
       repeat: false,
-      key: "cameraMove"
+      key: target.name + "Move"
     })
     this.#animations.push({
       animation,
       speed,
-      onProgress: (pos) => {
-        this.#camera.position.set(pos.x, pos.y, pos.z);
+      onProgress: (pos) => { //@ts-ignore 
+        target.position.set(pos.x, pos.y, pos.z);
       },
       onEnded,
       key: animation.key
@@ -516,44 +870,81 @@ export default class Scene {
   }
 
   /** @param {{
-   *    dest: {
-   *      x: number, y: number, z: number
-   *    },
+   *    target: THREE.Vector3,
    *    speed: number,
    *    curve?: (t: number) => number,
    *    onEnded?: (last:{
    *      x: number, y: number, z: number
    *    }) => void
-   * }} params
-   */
-  #rotateCamera({dest, speed, 
+   * }} params 
+   * */
+  #rotateCameraTo({targetPos, speed, 
     curve = AnimationCurves.smoothstep, onEnded = () => {}}) {
+    const qCamera = this.#camera.quaternion.clone();
+    this.#camera.lookAt(targetPos);
+    const dest = this.#camera.quaternion.clone();
+    this.#camera.quaternion.copy(qCamera);
     const animation = new Animation({
-      start: new THREE.Vector3( 
-        this.#camera.rotation.x,
-        this.#camera.rotation.y,
-        this.#camera.rotation.z,
-      ),
-      end: new THREE.Vector3(
-        dest.x, 
-        dest.y,
-        dest.z
-      ),
+      start: 0,
+      end: 1,
       curve,
       repeat: false,
-      key: "cameraRotate"
+      key: "cameraRotateTo"
     })
     this.#animations.push({
       animation,
       speed,
-      onProgress: (rotation) => {
-        this.#camera.rotation.set(rotation.x, rotation.y, rotation.z);
+      onProgress: (progress) => { //@ts-ignore 
+        this.#camera.quaternion.slerp(dest, progress);
       },
       onEnded,
       key: animation.key
     });
     return (this.#animations[this.#animations.length - 1]);
+    
+  }
 
+  /** @param {{
+   *    target: THREE.Object3D,
+   *    dest: {
+   *      x: number, y: number, z: number
+   *    },
+   *    speed: number,
+   *    curve?: (t: number) => number,
+   *    repeat?: boolean,
+   *    onEnded?: (last:{
+   *      x: number, y: number, z: number
+   *    }) => void
+   * }} params
+   */
+  #animateRotation({
+    target,
+    dest, 
+    speed, 
+    curve = AnimationCurves.smoothstep, 
+    repeat = false,
+    onEnded = () => {}}) {
+    const animation = new Animation({
+      start: new THREE.Vector3().copy(target.rotation),
+      end: new THREE.Vector3(
+        dest.x,
+        dest.y,
+        dest.z
+      ),
+      curve,
+      repeat,
+      key: target.name + "rotate"
+    })
+    this.#animations.push({
+      animation,
+      speed,
+      onProgress: (rotation) => { //@ts-ignore 
+        target.rotation.set(rotation.x, rotation.y, rotation.z);
+      },
+      onEnded,
+      key: animation.key
+    });
+    return (this.#animations[this.#animations.length - 1]);
   }
 
   #init() {
@@ -624,10 +1015,10 @@ export default class Scene {
       const entities = this.#addWall(
         size,
         walls.map(wall => ({
-            x: (wall.centerX * 0.01 - 0.5) * this.#gameSize.width,
-            y: (wall.centerY * 0.01 - 0.5) * this.#gameSize.height,
-            z: this.#depth.wall * 0.5,
-          })
+          x: (wall.centerX * 0.01 - 0.5) * this.#gameSize.width,
+          y: (wall.centerY * 0.01 - 0.5) * this.#gameSize.height,
+          z: this.#depth.wall * 0.5,
+        })
         )
       );
       for (let i = 0; i < walls.length; ++i) {
@@ -661,20 +1052,20 @@ export default class Scene {
     if (loadedTextures &&
       loadedTextures.colorTexture && 
       loadedTextures.normalTexture &&
-    loadedTextures. aoRoughnessMetallnessTexture) {
+      loadedTextures. aoRoughnessMetallnessTexture) {
 
       const textures = {};
       Object.entries(loadedTextures)
         .forEach(([ key, text ]) => {
           textures[key] = text.clone();
         });
-    return new THREE.MeshStandardMaterial({
-      map: textures.colorTexture,
-      normalMap: textures.normalTexture,
-      aoMap: textures.aoRoughnessMetallnessTexture,
-      roughnessMap: textures.aoRoughnessMetallnessTexture,
-      metalnessMap: textures.aoRoughnessMetallnessTexture,
-    });
+      return new THREE.MeshStandardMaterial({
+        map: textures.colorTexture,
+        normalMap: textures.normalTexture,
+        aoMap: textures.aoRoughnessMetallnessTexture,
+        roughnessMap: textures.aoRoughnessMetallnessTexture,
+        metalnessMap: textures.aoRoughnessMetallnessTexture,
+      });
 
     }
     //@ts-ignore
@@ -731,10 +1122,10 @@ export default class Scene {
     const material = this.#createMaterialFromTexture("brick", 
       (texture) => {
         this.#resizeTexture({
-        texture,
+          texture,
           x: wallSize.width * this.#wallTextureRepeat,
           y: wallSize.height * this.#wallTextureRepeat,
-      })
+        })
       }
     ) 
 
@@ -795,12 +1186,12 @@ export default class Scene {
     const positions = [
       {
         x: 0,
-        y: this.#gameSize.height * - 0.4
+        y: this.#gameSize.height * 0.4
       },
       {
         x: 0,
-        y: this.#gameSize.height * 0.4
-      }
+        y: this.#gameSize.height * - 0.4
+      },
     ];
     const meshes = materials.map((material, index) => {
       const mesh = new THREE.Mesh(
@@ -846,8 +1237,6 @@ export default class Scene {
 
     const gameAmbientLight = new THREE.AmbientLight(this.lightConfigs.ambientColor, this.lightConfigs.ambientIntensity);
     const gameDirectionalLight = new THREE.DirectionalLight(
-      this.lightConfigs.directionalcolor,
-      this.lightConfigs.directionalIntensity
     );
     gameDirectionalLight.castShadow = true;
     gameDirectionalLight.shadow.mapSize.set(1024, 1024);
@@ -889,7 +1278,7 @@ export default class Scene {
     container.add(particles);
     container.scale.set(100, 100, 100);
     this.#scene.add(container);
-    
+
     return this;
   }
 
@@ -944,8 +1333,11 @@ export default class Scene {
       0.1,
       150
     );
-    this.controls = new OrbitControls(this.#camera, this.#canvas)
-    this.controls.enableDamping = true
+    this.#scene.add(this.#camera);
+    if (this.#isDebug) {
+      this.#controls = new OrbitControls(this.#camera, this.#canvas);
+      this.#controls.enableDamping = true;
+    }
     return this;
   }
 
@@ -1014,8 +1406,10 @@ export default class Scene {
    * Dev tool
    */
   #addHelpers() {
-
+    if (!this.#isDebug)
+      return this;
     this.gui = new GUI();
+    this.gui.close();
     this.configs = {
       envMapIntensity: 1,
       bgmVolume: 0.05,
@@ -1041,16 +1435,16 @@ export default class Scene {
     const sound = this.gui.addFolder("sound");
 
     sound.add(this.configs, "bgmVolume")
-    .min(0)
-    .max(1)
+      .min(0)
+      .max(1)
       .step(0.001)
       .onChange(volume => {
         this.#bgm.volume = volume;
       })
-  
+
     sound.add(this.configs, "effectVolume")
-    .min(0)
-    .max(1)
+      .min(0)
+      .max(1)
       .step(0.001)
       .onChange(volume => {
         this.#hitSound.volume = volume;
@@ -1070,7 +1464,7 @@ export default class Scene {
           .forEach(([id, mesh]) => {
             mesh.material.color.set(newColor);
           })
-        
+
       })
 
     Object.entries(this.peddleColors).forEach(([player], index) => {
@@ -1107,7 +1501,7 @@ export default class Scene {
       .min(0).max(5)
       .step(0.01)
       .onChange(value => this.#lights.ambientLight.intensity = value);
-    
+
     light.add(this.lightConfigs, "directionalIntensity")
       .min(0).max(5)
       .step(0.01)
@@ -1178,11 +1572,33 @@ export default class Scene {
         return (collider.data?.isPeddle || collidee.data?.isPeddle);
       },
       (collider, collidee, time) => {
+        if (this.#stuckHandler && this.#safeWallHitCount > SAFE_WALL_STUCK_THRESHOLD) {
+          this.#stuckHandler(false);
+        }
+        this.#safeWallHitCount = 0;
         /** @type {PhysicsEntity} */
         const ball = collider.isShape("CIRCLE") ? collider: collidee;
         /** @type {PhysicsEntity} */
         const peddle = ball == collider ? collidee: collider;
         ball.veolocity.x += peddle.veolocity.x * 0.1;
+      }
+    )
+
+    const safeWallEventId = this.#physics.addCollisionCallback(
+      (collider, collidee, time) => {
+
+        if (!this.#stuckHandler) 
+          return false;
+        if (!collider.isShape("CIRCLE") && !collidee.isShape("CIRCLE")) {
+          return false;
+        } 
+        return (collidee.data?.wallType == WALL_TYPES.safe) ;
+      },
+      (collider, collidee, time) => {
+        this.#safeWallHitCount += 1;
+        if (this.#safeWallHitCount > SAFE_WALL_STUCK_THRESHOLD) {
+          this.#stuckHandler(true); 
+        }
       }
     )
 
@@ -1197,8 +1613,12 @@ export default class Scene {
       },
       (collider, collidee, time) => {
         this.#lostSide = collidee.data.direction;
+        if (this.#stuckHandler && this.#safeWallHitCount > SAFE_WALL_STUCK_THRESHOLD) {
+          this.#stuckHandler(false);
+        }
+        this.#safeWallHitCount = 0;
         this.#removeBall()
-        .#updateGameData();
+          .#updateGameData();
       }
     )
 
@@ -1214,6 +1634,10 @@ export default class Scene {
       desc: "hitBallEffect",
       id: hitBallEffectId
     });
+    this.#eventsIds.push({
+      desc: "safeWallEventId",
+      id: safeWallEventId
+    });
     return this;
   }
 
@@ -1224,7 +1648,6 @@ export default class Scene {
    * }} args
    */
   #updateObjects({frameTime, frameSlice}) {
-
     this.#peddles.forEach((peddle, index) => {
       const control = this.#peddleControls[index];
       this.#physics.setState(peddle.physicsId,
@@ -1275,21 +1698,25 @@ export default class Scene {
     /** @type {GameData} */ //@ts-ignore: casting
     const gameData = this.#gameData;
     /** @type {Player[]} */
-    const players = gameData.getPlayers();
+    const players = gameData.currentPlayers;
     if (this.#lostSide != DIRECTION.top && 
       this.#lostSide != DIRECTION.bottom) {
       throw "invalid side " + this.#lostSide;
     }
     const winSide = this.#lostSide == DIRECTION.top ? DIRECTION.bottom: DIRECTION.top;
     const winPlayer = players[PLAYER_POSITION[winSide]];
-    const newScores = {...gameData.scores}
-    newScores[winPlayer.nickname] += 1;
-    gameData.scores = newScores;
+    
+    gameData.setScore({
+      player: winPlayer, 
+      score: gameData.getScore(winPlayer) + 1
+    })
+    //@ts-ignore
+    this.#gameData.valueChanged("scores");
     return this;
   }
 
   #loadLeaf() {
-    
+
     this.#leaf = new LeafGenerator({
       loader: this.#gltfLoader,
       path: ASSETS.leaf
@@ -1300,18 +1727,19 @@ export default class Scene {
 
   #startRender() {
     const tick = (() => {
-      this.controls.update()
+      if (this.#isDebug)
+        this.#controls.update()
       const elapsed = this.#time.clock.getElapsedTime();
       let frameTime = elapsed - this.#time.elapsed;
       this.#time.elapsed = elapsed;
       this.#animations.forEach(
-      ({animation, speed, onProgress, key, onEnded}) => {
-        animation.proceed(speed);
-        onProgress(animation.current);
-        if (animation.isFinished) {
-          onEnded(animation.current);
-        }
-      })
+        ({animation, speed, onProgress, key, onEnded}) => {
+          animation.proceed(speed);
+          onProgress(animation.current);
+          if (animation.isFinished) {
+            onEnded(animation.current);
+          }
+        })
       this.#animations = this.#animations.filter(e => !e.animation.isFinished);
       let frameSlice = Math.min(frameTime, FRAME_TIME_THRESHOLD);
       this.#renderId = window.requestAnimationFrame(tick);

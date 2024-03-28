@@ -5,7 +5,7 @@ export default class NavBar extends View {
   constructor() {
     super();
   }
-  
+
   _modalToggler() {
     const profileCardModalBtn = this.querySelector('#profileCardModalBtn');
     const profileCardModal = this.querySelector('#profileCardModal');

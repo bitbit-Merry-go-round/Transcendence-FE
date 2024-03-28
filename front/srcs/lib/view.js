@@ -19,6 +19,7 @@ export default class View extends HTMLElement {
   };
   static regexReplace =  /{{([^}}]+)}}/;
   static regexMatch =  /{{([^}}]+)}}/;
+  isDisconnected = false;
 
   /** @type {{
    *  [key in string]: Promise[]
@@ -85,7 +86,7 @@ export default class View extends HTMLElement {
     if (!this.constructor.template) {
       await this.constructor.getTemplate();
     }
-    View.waitingComponents[this.constructor.name] = [];
+    //View.waitingComponents[this.constructor.name] = [];
 
     /** @type {HTMLElement} node */
     this.innerHTML = this.constructor.template;
@@ -95,6 +96,7 @@ export default class View extends HTMLElement {
       .#expandForLoops(this)
       .#filterCondition(this, this.data)
       .#fillData(this);
+    this.didRendered();
   }
 
   reRender() {
@@ -124,10 +126,10 @@ export default class View extends HTMLElement {
       const html = view;
       html.dataset["parent"] = this.constructor.name;
       await view.render();
+      /*
       if (!View.waitingComponents[this.constructor.name][className]) {
         View.waitingComponents[this.constructor.name][className] = [];
       }
-      
       new Promise(resolve => {
         View.waitingComponents[this.constructor.name][className].push(
           {
@@ -135,8 +137,8 @@ export default class View extends HTMLElement {
             isResolved: false
           }
         );
-
       })
+      */
       elements[i].replaceWith(view);
     }
     return this;
@@ -185,8 +187,7 @@ export default class View extends HTMLElement {
     return root;
   }
 
-  /** @param {HTMLElement} node */
-  #expandForLoop(node) {
+  #expandForLoop(node, additionalData = null) {
     const keys = node.getAttribute(LOOP_KEY).split("in")
       .map(key => key.trim());
 
@@ -194,17 +195,18 @@ export default class View extends HTMLElement {
       console.err("Not valid for loop use 'A in B'", node);
       return;
     }
-    let values = getValue(this.data, keys[1]);
-    if (!Array.isArray(values)) {
-      console.error(`Data for ${key[1]} is not array `, 
+    const container = additionalData? {
+      ...this.data,
+      ...additionalData
+    }: this.data;    
+    let values = getValue(container, keys[1]);
+    if (!values || !Array.isArray(values)) {
+      console.error(`Data for ${keys[1]} is not array  is it inner loop?`, 
         values
       );
       return ;
     }
-    
-    const container = {
-      ...this.data,
-    }
+
     const template = node.innerHTML;
     node.innerHTML = "";
     values.forEach(elem => {
@@ -212,7 +214,39 @@ export default class View extends HTMLElement {
       node.innerHTML += this.#replaceContent(template, 
         container );
       this.#filterCondition(node, container);
+
+
+      const innerElements = [...node.children].filter(
+        elem => {
+          if (elem.hasAttribute(LOOP_KEY))
+            return true;
+          if (elem.children.length == 0) {
+            return false;
+          }
+          if ([...elem.children].find(c => c.hasAttribute(LOOP_KEY))) {
+            return true; 
+          }
+        });
+      if (innerElements.length > 0) {
+        for (let i = 0; i < innerElements.length; i++) {
+          const innerRoot = innerElements[i].hasAttribute(LOOP_KEY) ? innerElements[i]: [...innerElements[i].children].find(c => c.hasAttribute(LOOP_KEY));
+          const innerKeys = innerRoot.getAttribute(LOOP_KEY).split("in")
+            .map(key => key.trim());
+
+          if (innerKeys.length < 2)  {
+            console.err("Not valid for loop use 'A in B'", node);
+            return;
+          }
+          const innerValues = getValue(elem, innerKeys[1]);
+          this.#expandForLoop(innerRoot, 
+            {
+              [innerKeys[1]]: innerValues
+            }
+          );
+        }
+      }
     })
+    node.removeAttribute(LOOP_KEY);
   }
 
     /** @param {HTMLElement} node
@@ -262,6 +296,9 @@ export default class View extends HTMLElement {
         return content;
       }
       const data = getValue(container, matches[1]);
+      if (data == undefined || data == null) {
+        return content;
+      }
       content = content.replace(
         new RegExp(matches[0], "g"), data);
       }
@@ -270,7 +307,8 @@ export default class View extends HTMLElement {
   connectedCallback() {
   }
 
-  disConnectedCallback() { }
+  disconnectedCallback() { }
+  didRendered() {}
 
   async componentsConnected() {
     if (this.waitingComponents.length > 1) {

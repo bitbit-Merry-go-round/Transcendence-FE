@@ -18,10 +18,10 @@ class Router {
 
   static _shared;
   static get transitionDistX() {
-    return 50;
+    return 30;
   }
   static get transitionOpacity() {
-    return 0.5;
+    return 0.7;
   }
 
   /** @type {{
@@ -62,9 +62,6 @@ class Router {
       else if (destPath == "/") {
         direction = currentPath== "/login" ? NAVIGATE_DRIRECTION.forward: NAVIGATE_DRIRECTION.backward;
       } 
-      else if (currentPath != "/" && this.#pages.prev?.path == destPath) {
-        direction = NAVIGATE_DRIRECTION.backward;
-      }
     }
 
     const page = new view({
